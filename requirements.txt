@@ -2,3 +2,5 @@ pandas
 playwright
 google-generativeai
 python-dotenv
+streamlit
+markdown
