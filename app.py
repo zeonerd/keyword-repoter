@@ -145,8 +145,6 @@ def scraper_worker():
         run_scraper()
     except Exception as e:
         print(f"Scraper Error: {e}")
-    finally:
-        st.session_state.is_running = False
 
 def start_scraper():
     if not st.session_state.is_running:
@@ -172,6 +170,38 @@ today_str = date.today().strftime('%Y-%m-%d')
 log_file_path = os.path.join("logs", f"scraper_{today_str}.log")
 results_dir = os.path.join("results", today_str)
 
+# --- 로그 기반 진행률 계산 (컬럼 렌더링 전 수행) ---
+_log_text = "로그 대기 중..."
+_progress_count = 0
+_latest_status = st.session_state.status_msg
+
+if os.path.exists(log_file_path):
+    with open(log_file_path, "r", encoding="utf-8") as f:
+        _lines = f.readlines()
+        if _lines:
+            _log_text = "".join(_lines)
+            _success_count = sum(1 for line in _lines if "저장 성공" in line or "데이터 없음" in line or "에러 발생" in line)
+            _progress_count = min(_success_count, 8)
+            for line in reversed(_lines):
+                if "수집 시작" in line:
+                    _latest_status = line.split("]")[-1].strip()
+                    break
+                elif "모든 데이터 수집 완료" in line:
+                    _latest_status = "수집 완료!"
+                    _progress_count = 8
+                    break
+
+# --- 수집 완료 감지 ---
+if st.session_state.is_running:
+    st.session_state.progress = _progress_count
+    st.session_state.status_msg = f"{_progress_count} / 8 개 완료 (최근: {_latest_status})"
+    if _progress_count >= 8:
+        st.session_state.is_running = False
+        st.toast("✅ 데이터 수집이 성공적으로 완료되었습니다!", icon="🎉")
+    elif st.session_state.thread is not None and not st.session_state.thread.is_alive():
+        st.session_state.is_running = False
+        st.toast("⚠️ 데이터 수집이 중단되었습니다. 로그를 확인하세요.", icon="⚠️")
+
 with col1:
     st.markdown("""
         <div class="glass-card">
@@ -187,22 +217,12 @@ with col1:
     """, unsafe_allow_html=True)
     
     
-    # 버튼 클릭 시 보고서 생성 여부를 결정하는 상태 추가
-    if 'run_report_after_scraping' not in st.session_state:
-        st.session_state.run_report_after_scraping = True
-        
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        if st.button("🚀 전체 자동화 실행" if not st.session_state.is_running else "⏳ 진행 중...", disabled=st.session_state.is_running, help="수집부터 보고서 생성까지 연속 실행"):
-            st.session_state.run_report_after_scraping = True
+        if st.button("🕷️ 수집 실행 (TOP500)" if not st.session_state.is_running else "⏳ 진행 중...", disabled=st.session_state.is_running, help="식품 4개 카테고리 TOP 500 데이터 수집"):
             start_scraper()
             st.rerun()
     with c2:
-        if st.button("🕷️ 수집만 실행 (TOP500)", disabled=st.session_state.is_running, help="AI 보고서 생성 단계 생략"):
-            st.session_state.run_report_after_scraping = False
-            start_scraper()
-            st.rerun()
-    with c3:
         if st.button("📝 보고서만 재생성", disabled=st.session_state.is_running, help="스크래핑 생략, 기존 데이터 기반"):
             st.session_state.needs_report = True
             st.rerun()
@@ -221,46 +241,10 @@ with col2:
         </div>
     """, unsafe_allow_html=True)
     
-    # Read log file if exists
-    log_text = "로그 대기 중..."
-    progress_count = 0
-    status = st.session_state.status_msg
-    
-    if os.path.exists(log_file_path):
-        with open(log_file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            if lines:
-                log_text = "".join(lines)
-                # Calculate progress
-                success_count = sum(1 for line in lines if "저장 성공" in line or "데이터 없음" in line or "에러 발생" in line)
-                # Not counting perfectly but approx for 8 steps
-                progress_count = min(success_count, 8)
-                
-                # Extract latest meaningful status
-                for line in reversed(lines):
-                    if "수집 시작" in line:
-                        status = line.split("]")[-1].strip()
-                        break
-                    elif "모든 데이터 수집 완료" in line:
-                        status = "수집 완료!"
-                        progress_count = 8
-                        break
-    
-    if st.session_state.is_running:
-        st.session_state.progress = progress_count
-        st.session_state.status_msg = f"{progress_count} / 8 개 완료 (최근: {status})"
-        if progress_count >= 8:
-            st.session_state.is_running = False
-            if st.session_state.get('run_report_after_scraping', True):
-                st.session_state.needs_report = True
-                st.toast("✅ 스크래핑이 완료되었습니다! AI 보고서 생성을 시작합니다.", icon="🎉")
-            else:
-                st.toast("✅ 데이터 수집이 성공적으로 완료되었습니다!", icon="🎉")
-            
     # Autoscroll to bottom logic using JS injected with markdown or simple text area
     st.markdown(f"""
         <div class="log-terminal" id="log-container">
-            {log_text.replace(chr(10), '<br>')}
+            {_log_text.replace(chr(10), '<br>')}
         </div>
         <script>
             var logContainer = document.getElementById("log-container");
