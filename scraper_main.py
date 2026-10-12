@@ -3,9 +3,12 @@ import time
 import re
 import pandas as pd
 import logging
+import sys
 from datetime import date
 from playwright.sync_api import sync_playwright
 from date_utils import get_recent_7days, get_future_pred_7days
+
+logger = logging.getLogger("scraper")
 
 def set_date_dropdown(page, index, value):
     """
@@ -46,29 +49,55 @@ def set_date_dropdown(page, index, value):
                 break
         time.sleep(0.5)
     except Exception as e:
-        logging.error(f"드롭다운 클릭 에러 ({value}): {e}")
+        logger.error(f"드롭다운 클릭 에러 ({value}): {e}")
+
+def setup_logger(log_file):
+    """
+    실행할 때마다 핸들러를 새로 연결합니다.
+    (logging.basicConfig는 프로세스당 한 번만 적용되어, Streamlit을 켜둔 채 날짜가 바뀌면 이전 날짜 파일에 기록되는 문제 방지)
+    """
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    for handler in (logging.FileHandler(log_file, encoding='utf-8'), logging.StreamHandler()):
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
 def run_scraper():
+    """
+    전체 수집을 실행하고 실패한 수집 대상 목록을 반환합니다.
+    브라우저 실행 실패 등 치명적 오류는 로그에 남긴 뒤 다시 발생시킵니다.
+    """
     today_str = date.today().strftime('%Y-%m-%d')
-    
+
     # 로깅 설정
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"scraper_{today_str}.log")
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        handlers=[
-            logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler()
-        ]
-    )
-    logging.info("데이터 수집 스크립트 시작")
-    
+
+    setup_logger(log_file)
+    logger.info("데이터 수집 스크립트 시작")
+
     output_dir = os.path.join("results", today_str)
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    failures = []
+    try:
+        total = _scrape_all(output_dir, failures)
+    except Exception:
+        logger.exception("치명적 오류로 수집 중단")
+        raise
+
+    if failures:
+        logger.warning(f"수집 실패 {len(failures)}건: {', '.join(failures)}")
+    logger.info(f"모든 데이터 수집 완료 (성공 {total - len(failures)} / {total})")
+    return failures
+
+def _scrape_all(output_dir, failures):
     categories = [
         ("축산물", None),
         ("수산물", None),
@@ -91,7 +120,7 @@ def run_scraper():
                 cat_name_for_file = f"{cat2}_{cat3}" if cat3 else cat2
                 output_file = os.path.join(output_dir, f"{cat_name_for_file}_{period_name}.csv")
                 
-                logging.info(f"[{period_name}] {cat_name_for_file} 수집 시작... (기간: {start_date} ~ {end_date})")
+                logger.info(f"[{period_name}] {cat_name_for_file} 수집 시작... (기간: {start_date} ~ {end_date})")
                 
                 # 매 반복마다 완전 독립된 새 브라우저 컨텍스트(탭/쿠키 초기화) 생성
                 context = browser.new_context(viewport={'width': 1280, 'height': 800})
@@ -174,20 +203,24 @@ def run_scraper():
                     if all_data:
                         df = pd.DataFrame(all_data)
                         df.to_csv(output_file, index=False, encoding='utf-8-sig')
-                        logging.info(f"저장 성공: {output_file} (총 {len(df)}건)")
+                        logger.info(f"저장 성공: {output_file} (총 {len(df)}건)")
                     else:
-                        logging.warning(f"데이터 없음: {output_file}")
+                        logger.warning(f"데이터 없음: {output_file}")
+                        failures.append(f"{cat_name_for_file}_{period_name}")
                         
                 except Exception as e:
-                    logging.error(f"에러 발생 ({cat_name_for_file} - {period_name}): {e}")
+                    logger.error(f"에러 발생 ({cat_name_for_file} - {period_name}): {e}")
+                    failures.append(f"{cat_name_for_file}_{period_name}")
                 finally:
                     context.close()
                     
-                logging.info("봇 탐지 방지: 3초 대기...")
+                logger.info("봇 탐지 방지: 3초 대기...")
                 time.sleep(3)
                 
         browser.close()
-        logging.info("모든 데이터 수집 완료")
+
+    return len(categories) * len(periods)
 
 if __name__ == "__main__":
-    run_scraper()
+    # 일부라도 실패하면 종료 코드 1 (GitHub Actions에서 실패로 표시)
+    sys.exit(1 if run_scraper() else 0)

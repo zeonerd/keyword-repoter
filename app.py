@@ -138,6 +138,8 @@ if 'status_msg' not in st.session_state:
     st.session_state.status_msg = "대기 중"
 if 'needs_report' not in st.session_state:
     st.session_state.needs_report = False
+if 'log_offset' not in st.session_state:
+    st.session_state.log_offset = 0
 
 # --- Threading Function ---
 def scraper_worker():
@@ -146,8 +148,14 @@ def scraper_worker():
     except Exception as e:
         print(f"Scraper Error: {e}")
 
-def start_scraper():
+def start_scraper(log_file_path):
     if not st.session_state.is_running:
+        # 같은 날 여러 번 실행해도 이번 실행분 로그만으로 진행률을 계산하도록 시작 시점 위치 기록
+        if os.path.exists(log_file_path):
+            with open(log_file_path, "r", encoding="utf-8") as f:
+                st.session_state.log_offset = len(f.readlines())
+        else:
+            st.session_state.log_offset = 0
         st.session_state.is_running = True
         st.session_state.progress = 0
         st.session_state.status_msg = "초기화 중..."
@@ -180,9 +188,10 @@ if os.path.exists(log_file_path):
         _lines = f.readlines()
         if _lines:
             _log_text = "".join(_lines)
-            _success_count = sum(1 for line in _lines if "저장 성공" in line or "데이터 없음" in line or "에러 발생" in line)
+            _run_lines = _lines[st.session_state.log_offset:]
+            _success_count = sum(1 for line in _run_lines if "저장 성공" in line or "데이터 없음" in line or "에러 발생" in line)
             _progress_count = min(_success_count, 8)
-            for line in reversed(_lines):
+            for line in reversed(_run_lines):
                 if "수집 시작" in line:
                     _latest_status = line.split("]")[-1].strip()
                     break
@@ -220,7 +229,7 @@ with col1:
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🕷️ 수집 실행 (TOP500)" if not st.session_state.is_running else "⏳ 진행 중...", disabled=st.session_state.is_running, help="식품 4개 카테고리 TOP 500 데이터 수집"):
-            start_scraper()
+            start_scraper(log_file_path)
             st.rerun()
     with c2:
         if st.button("📝 보고서만 재생성", disabled=st.session_state.is_running, help="스크래핑 생략, 기존 데이터 기반"):
