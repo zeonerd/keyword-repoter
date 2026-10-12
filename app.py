@@ -3,7 +3,6 @@ import threading
 import os
 import time
 import pandas as pd
-import markdown
 from datetime import date
 from scraper_main import run_scraper
 
@@ -136,8 +135,6 @@ if 'progress' not in st.session_state:
     st.session_state.progress = 0
 if 'status_msg' not in st.session_state:
     st.session_state.status_msg = "대기 중"
-if 'needs_report' not in st.session_state:
-    st.session_state.needs_report = False
 if 'log_offset' not in st.session_state:
     st.session_state.log_offset = 0
 
@@ -226,15 +223,9 @@ with col1:
     """, unsafe_allow_html=True)
     
     
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("🕷️ 수집 실행 (TOP500)" if not st.session_state.is_running else "⏳ 진행 중...", disabled=st.session_state.is_running, help="식품 4개 카테고리 TOP 500 데이터 수집"):
-            start_scraper(log_file_path)
-            st.rerun()
-    with c2:
-        if st.button("📝 보고서만 재생성", disabled=st.session_state.is_running, help="스크래핑 생략, 기존 데이터 기반"):
-            st.session_state.needs_report = True
-            st.rerun()
+    if st.button("🕷️ 수집 실행 (TOP500)" if not st.session_state.is_running else "⏳ 진행 중...", disabled=st.session_state.is_running, help="식품 4개 카테고리 TOP 500 데이터 수집"):
+        start_scraper(log_file_path)
+        st.rerun()
 
     if st.session_state.is_running:
         st.markdown(f"**진행 상태:** {st.session_state.status_msg}")
@@ -261,94 +252,18 @@ with col2:
         </script>
     """, unsafe_allow_html=True)
 
-# --- Report Generation Section ---
-if st.session_state.get('needs_report', False):
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    st.markdown("<h3 style='text-align: center; color: #a5b4fc;'>🤖 AI가 데이터를 분석하여 인사이트를 도출하고 있습니다...</h3>", unsafe_allow_html=True)
-    
-    with st.spinner("보고서를 생성하고 있습니다... 잠시만 기다려주세요."):
-        from generate_report import run_report_generation
-        today_str = date.today().strftime('%Y-%m-%d')
-        run_report_generation(today_str)
-        
-    st.session_state.needs_report = False
-    st.toast("✅ 보고서 생성이 완료되었습니다!", icon="🎉")
-    st.rerun()
-
 # --- Results Section ---
 st.markdown("<br><br>", unsafe_allow_html=True)
-st.markdown("## 📂 분석 결과 및 수집 데이터 확인")
-
-report_dir = "reports"
-report_file = os.path.join(report_dir, f"{today_str}_종합분석보고서.md")
+st.markdown("## 📂 수집 데이터 확인")
 
 has_results = os.path.exists(results_dir)
-csv_files = [f for f in os.listdir(results_dir) if f.endswith(".csv")] if has_results else []
+csv_files = sorted(f for f in os.listdir(results_dir) if f.endswith(".csv")) if has_results else []
 
-tab_names = []
-if os.path.exists(report_file):
-    tab_names.append("📝 종합 분석 보고서")
-tab_names.extend([f.replace(".csv", "") for f in csv_files])
+if csv_files:
+    tabs = st.tabs([f.replace(".csv", "") for f in csv_files])
 
-if tab_names:
-    tabs = st.tabs(tab_names)
-    tab_idx = 0
-    
-    if os.path.exists(report_file):
-        with tabs[tab_idx]:
-            with open(report_file, "r", encoding="utf-8") as f:
-                report_content = f.read()
-            st.markdown(report_content)
-            
-            html_content = markdown.markdown(report_content, extensions=['tables'])
-            styled_html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-            <meta charset="utf-8">
-            <title>종합 분석 보고서 ({today_str})</title>
-            <style>
-                body {{ font-family: 'Pretendard', 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; line-height: 1.6; padding: 40px; max-width: 900px; margin: 0 auto; color: #333; }}
-                h1, h2, h3, h4 {{ color: #2c3e50; margin-top: 1.5em; }}
-                h1 {{ border-bottom: 2px solid #2c3e50; padding-bottom: 10px; }}
-                table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 14px; }}
-                th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-                th {{ background-color: #f8fafc; font-weight: bold; }}
-                tr:nth-child(even) {{ background-color: #fcfcfc; }}
-                ul {{ margin-bottom: 20px; }}
-                li {{ margin-bottom: 8px; }}
-                @media print {{
-                    body {{ padding: 0; max-width: none; }}
-                }}
-            </style>
-            </head>
-            <body>
-            {html_content}
-            </body>
-            </html>
-            """
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                st.download_button(
-                    label="📥 마크다운 원본 다운로드 (.md)",
-                    data=report_content,
-                    file_name=f"{today_str}_종합분석보고서.md",
-                    mime="text/markdown",
-                    key="dl_report_md"
-                )
-            with c2:
-                st.download_button(
-                    label="🖨️ 인쇄용 웹 문서 다운로드 (.html)",
-                    data=styled_html,
-                    file_name=f"{today_str}_종합분석보고서_인쇄용.html",
-                    mime="text/html",
-                    key="dl_report_html"
-                )
-        tab_idx += 1
-        
-    for i, file_name in enumerate(csv_files):
-        with tabs[tab_idx]:
+    for i, (tab, file_name) in enumerate(zip(tabs, csv_files)):
+        with tab:
             file_path = os.path.join(results_dir, file_name)
             df = pd.read_csv(file_path)
             
@@ -365,6 +280,5 @@ if tab_names:
                     mime="text/csv",
                     key=f"dl_{i}"
                 )
-        tab_idx += 1
 else:
-    st.info("오늘 생성된 결과 파일이나 보고서가 없습니다.")
+    st.info("오늘 수집된 데이터가 없습니다.")
