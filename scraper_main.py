@@ -6,9 +6,26 @@ import logging
 import sys
 from datetime import date
 from playwright.sync_api import sync_playwright
-from date_utils import get_recent_7days, get_future_pred_7days
+from date_utils import get_weekly_periods
 
 logger = logging.getLogger("scraper")
+
+# (파일명용 이름, 2분류, 3분류) - 1분류는 '식품' 고정
+CATEGORIES = [
+    ("축산물", "축산물", None),
+    ("수산물", "수산물", None),
+    ("과일", "농산물", "과일"),
+    ("채소", "농산물", "채소"),
+]
+
+def output_filename(label, start_date, end_date):
+    """예: 과일_2025-10-13_2025-10-19.csv"""
+    return f"{label}_{start_date:%Y-%m-%d}_{end_date:%Y-%m-%d}.csv"
+
+def read_date_dropdowns(page):
+    """기간 드롭다운(인덱스 3~8)에 현재 선택된 값을 (시작연, 시작월, 시작일, 종료연, 종료월, 종료일)로 반환"""
+    visible_divs = [d for d in page.locator("div.select").all() if d.is_visible()]
+    return tuple(d.locator("span.select_btn").inner_text().strip() for d in visible_divs[3:9])
 
 def set_date_dropdown(page, index, value):
     """
@@ -32,24 +49,23 @@ def set_date_dropdown(page, index, value):
         time.sleep(0.5)
         
     current_val = div.locator("span.select_btn").inner_text().strip()
-    if value in current_val:
+    if current_val == value:
         return
         
-    try:
-        # 강제 클릭(force=True)을 사용하여 요소 겹침이나 애니메이션 방해를 완벽히 무시하고 클릭
-        div.locator("span.select_btn").click(force=True)
-        time.sleep(0.5)
-        
-        # 닫혀있는 드롭다운의 옵션 텍스트를 정확히 읽어오기 위해 text_content() 사용
-        options = div.locator("a.option").all()
-        for opt in options:
-            opt_text = opt.text_content() or ""
-            if value in opt_text.strip():
-                opt.click(force=True)
-                break
-        time.sleep(0.5)
-    except Exception as e:
-        logger.error(f"드롭다운 클릭 에러 ({value}): {e}")
+    # 강제 클릭(force=True)을 사용하여 요소 겹침이나 애니메이션 방해를 완벽히 무시하고 클릭
+    div.locator("span.select_btn").click(force=True)
+    time.sleep(0.5)
+    
+    # 닫혀있는 드롭다운의 옵션 텍스트를 정확히 읽어오기 위해 text_content() 사용
+    # (선택할 수 없는 값이면 예외 발생 - 엉뚱한 기간의 데이터가 저장되는 것을 방지)
+    options = div.locator("a.option").all()
+    for opt in options:
+        if (opt.text_content() or "").strip() == value:
+            opt.click(force=True)
+            break
+    else:
+        raise Exception(f"드롭다운에서 '{value}'을(를) 선택할 수 없습니다. (index: {index}, 선택 가능: {[(o.text_content() or '').strip() for o in options]})")
+    time.sleep(0.5)
 
 def setup_logger(log_file):
     """
@@ -98,29 +114,19 @@ def run_scraper():
     return failures
 
 def _scrape_all(output_dir, failures):
-    categories = [
-        ("축산물", None),
-        ("수산물", None),
-        ("농산물", "과일"),
-        ("농산물", "채소")
-    ]
-    
-    periods = [
-        ("최근7일", get_recent_7days()),
-        ("미래예측7일", get_future_pred_7days())
-    ]
+    periods = get_weekly_periods()
     
     with sync_playwright() as p:
         # GitHub Actions 등 CI 환경에서는 headless=True, 로컬에서는 headless=False 로 동작하게 설정
         is_ci = os.getenv("GITHUB_ACTIONS") == "true"
         browser = p.chromium.launch(headless=is_ci)
         
-        for cat2, cat3 in categories:
-            for period_name, (start_date, end_date) in periods:
-                cat_name_for_file = f"{cat2}_{cat3}" if cat3 else cat2
-                output_file = os.path.join(output_dir, f"{cat_name_for_file}_{period_name}.csv")
+        for label, cat2, cat3 in CATEGORIES:
+            for period_name, start_date, end_date in periods:
+                file_name = output_filename(label, start_date, end_date)
+                output_file = os.path.join(output_dir, file_name)
                 
-                logger.info(f"[{period_name}] {cat_name_for_file} 수집 시작... (기간: {start_date} ~ {end_date})")
+                logger.info(f"[{period_name}] {label} 수집 시작... (기간: {start_date} ~ {end_date})")
                 
                 # 매 반복마다 완전 독립된 새 브라우저 컨텍스트(탭/쿠키 초기화) 생성
                 context = browser.new_context(viewport={'width': 1280, 'height': 800})
@@ -139,7 +145,14 @@ def _scrape_all(output_dir, failures):
                     set_date_dropdown(page, 6, str(end_date.year))
                     set_date_dropdown(page, 7, f"{end_date.month:02d}")
                     set_date_dropdown(page, 8, f"{end_date.day:02d}")
-                    
+
+                    # 종료일 설정 중 사이트가 시작일을 자동 조정할 수 있으므로 최종 선택값을 다시 확인
+                    expected = (str(start_date.year), f"{start_date.month:02d}", f"{start_date.day:02d}",
+                                str(end_date.year), f"{end_date.month:02d}", f"{end_date.day:02d}")
+                    actual = read_date_dropdowns(page)
+                    if actual != expected:
+                        raise Exception(f"기간 설정 불일치 (기대: {expected}, 실제: {actual})")
+
                     # 2. 카테고리 설정 (숨겨진 모바일 요소 필터링)
                     def select_category(cat_name):
                         # DOM에 해당 카테고리가 렌더링될 때까지 대기 (AJAX)
@@ -206,11 +219,11 @@ def _scrape_all(output_dir, failures):
                         logger.info(f"저장 성공: {output_file} (총 {len(df)}건)")
                     else:
                         logger.warning(f"데이터 없음: {output_file}")
-                        failures.append(f"{cat_name_for_file}_{period_name}")
+                        failures.append(file_name)
                         
                 except Exception as e:
-                    logger.error(f"에러 발생 ({cat_name_for_file} - {period_name}): {e}")
-                    failures.append(f"{cat_name_for_file}_{period_name}")
+                    logger.error(f"에러 발생 ({label} - {period_name}): {e}")
+                    failures.append(file_name)
                 finally:
                     context.close()
                     
@@ -219,7 +232,7 @@ def _scrape_all(output_dir, failures):
                 
         browser.close()
 
-    return len(categories) * len(periods)
+    return len(CATEGORIES) * len(periods)
 
 if __name__ == "__main__":
     # 일부라도 실패하면 종료 코드 1 (GitHub Actions에서 실패로 표시)

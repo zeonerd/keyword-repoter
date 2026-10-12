@@ -4,7 +4,8 @@ import os
 import time
 import pandas as pd
 from datetime import date
-from scraper_main import run_scraper
+from scraper_main import run_scraper, CATEGORIES, output_filename
+from date_utils import get_weekly_periods
 
 # --- Page Config ---
 st.set_page_config(
@@ -175,6 +176,10 @@ today_str = date.today().strftime('%Y-%m-%d')
 log_file_path = os.path.join("logs", f"scraper_{today_str}.log")
 results_dir = os.path.join("results", today_str)
 
+# 수집 대상: 카테고리 4개 x 기간 7개
+periods = get_weekly_periods()
+TOTAL_TARGETS = len(CATEGORIES) * len(periods)
+
 # --- 로그 기반 진행률 계산 (컬럼 렌더링 전 수행) ---
 _log_text = "로그 대기 중..."
 _progress_count = 0
@@ -187,21 +192,21 @@ if os.path.exists(log_file_path):
             _log_text = "".join(_lines)
             _run_lines = _lines[st.session_state.log_offset:]
             _success_count = sum(1 for line in _run_lines if "저장 성공" in line or "데이터 없음" in line or "에러 발생" in line)
-            _progress_count = min(_success_count, 8)
+            _progress_count = min(_success_count, TOTAL_TARGETS)
             for line in reversed(_run_lines):
                 if "수집 시작" in line:
                     _latest_status = line.split("]")[-1].strip()
                     break
                 elif "모든 데이터 수집 완료" in line:
                     _latest_status = "수집 완료!"
-                    _progress_count = 8
+                    _progress_count = TOTAL_TARGETS
                     break
 
 # --- 수집 완료 감지 ---
 if st.session_state.is_running:
     st.session_state.progress = _progress_count
-    st.session_state.status_msg = f"{_progress_count} / 8 개 완료 (최근: {_latest_status})"
-    if _progress_count >= 8:
+    st.session_state.status_msg = f"{_progress_count} / {TOTAL_TARGETS} 개 완료 (최근: {_latest_status})"
+    if _progress_count >= TOTAL_TARGETS:
         st.session_state.is_running = False
         st.toast("✅ 데이터 수집이 성공적으로 완료되었습니다!", icon="🎉")
     elif st.session_state.thread is not None and not st.session_state.thread.is_alive():
@@ -209,15 +214,20 @@ if st.session_state.is_running:
         st.toast("⚠️ 데이터 수집이 중단되었습니다. 로그를 확인하세요.", icon="⚠️")
 
 with col1:
-    st.markdown("""
+    period_items = "".join(
+        f"<li style='padding-left: 1.2em;'>· {label} : {start:%Y-%m-%d} ~ {end:%m-%d}</li>"
+        for label, start, end in periods
+    )
+    st.markdown(f"""
         <div class="glass-card">
             <h3>⚙️ 스크래핑 설정 요약</h3>
             <hr style="border-color: rgba(255,255,255,0.1); margin: 12px 0;">
             <ul style="list-style: none; padding: 0; margin: 0; color: #cbd5e1; line-height: 1.8;">
-                <li>📍 <b>타겟</b> : 식품 하위 4개 카테고리</li>
-                <li>📅 <b>기간</b> : 최근 7일 / 미래예측 7일 (총 8회)</li>
+                <li>📍 <b>타겟</b> : 식품 하위 {len(CATEGORIES)}개 카테고리 ({" / ".join(c[0] for c in CATEGORIES)})</li>
+                <li>📅 <b>기간</b> : 주 단위(월~일) {len(periods)}개 기간 (총 {TOTAL_TARGETS}회, 약 {TOTAL_TARGETS}분 소요)</li>
+                {period_items}
                 <li>👥 <b>연령</b> : 40대 / 50대 / 60대 이상</li>
-                <li>📊 <b>수집량</b> : 카테고리당 최대 500건</li>
+                <li>📊 <b>수집량</b> : 파일당 최대 500건</li>
             </ul>
         </div>
     """, unsafe_allow_html=True)
@@ -229,7 +239,7 @@ with col1:
 
     if st.session_state.is_running:
         st.markdown(f"**진행 상태:** {st.session_state.status_msg}")
-        st.progress(st.session_state.progress / 8.0)
+        st.progress(st.session_state.progress / TOTAL_TARGETS)
         st.markdown("<p style='font-size: 13px; color: #94a3b8; text-align: center;'>UI 스레드는 안전하게 분리되어 있습니다. 창을 닫지 마세요.</p>", unsafe_allow_html=True)
         time.sleep(2) # Auto refresh trigger
         st.rerun()
@@ -256,15 +266,31 @@ with col2:
 st.markdown("<br><br>", unsafe_allow_html=True)
 st.markdown("## 📂 수집 데이터 확인")
 
-has_results = os.path.exists(results_dir)
-csv_files = sorted(f for f in os.listdir(results_dir) if f.endswith(".csv")) if has_results else []
+def period_option_label(period, file_name):
+    label, start, end = period
+    text = f"{label}  {start:%Y-%m-%d} ~ {end:%m-%d}"
+    return text if os.path.exists(os.path.join(results_dir, file_name)) else f"{text}  (없음)"
 
-if csv_files:
-    tabs = st.tabs([f.replace(".csv", "") for f in csv_files])
+expected_files = [output_filename(c[0], start, end) for c in CATEGORIES for _, start, end in periods]
+if any(os.path.exists(os.path.join(results_dir, f)) for f in expected_files):
+    tabs = st.tabs([c[0] for c in CATEGORIES])
 
-    for i, (tab, file_name) in enumerate(zip(tabs, csv_files)):
+    for tab, (cat_label, _, _) in zip(tabs, CATEGORIES):
         with tab:
+            file_names = [output_filename(cat_label, start, end) for _, start, end in periods]
+            selected = st.radio(
+                "기간 선택",
+                options=range(len(periods)),
+                format_func=lambda i: period_option_label(periods[i], file_names[i]),
+                key=f"period_{cat_label}",
+            )
+            file_name = file_names[selected]
             file_path = os.path.join(results_dir, file_name)
+            
+            if not os.path.exists(file_path):
+                st.warning(f"{file_name} 파일이 없습니다. 수집에 실패했거나 아직 수집하지 않은 기간입니다.")
+                continue
+            
             df = pd.read_csv(file_path)
             
             c1, c2 = st.columns([4, 1])
@@ -278,7 +304,8 @@ if csv_files:
                     data=csv_data,
                     file_name=file_name,
                     mime="text/csv",
-                    key=f"dl_{i}"
+                    key=f"dl_{cat_label}"
                 )
+                st.caption(file_name)
 else:
     st.info("오늘 수집된 데이터가 없습니다.")
