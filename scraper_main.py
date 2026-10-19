@@ -27,6 +27,28 @@ def read_date_dropdowns(page):
     visible_divs = [d for d in page.locator("div.select").all() if d.is_visible()]
     return tuple(d.locator("span.select_btn").inner_text().strip() for d in visible_divs[3:9])
 
+def wait_for_page(page, p_num, timeout=15000):
+    """
+    페이지 넘김 후 목록 첫 순위가 해당 페이지 값((p_num-1)*20+1)으로 바뀔 때까지 대기합니다.
+    (고정 대기만 하면 응답이 늦을 때 이전 페이지를 다시 읽어 순위가 중복·누락됨)
+    """
+    page.wait_for_function(
+        """(expected) => {
+            const el = document.querySelector("ul.rank_top1000_list li span.rank_top1000_num");
+            return el !== null && el.textContent.trim() === expected;
+        }""",
+        arg=str((p_num - 1) * 20 + 1),
+        timeout=timeout,
+    )
+
+def validate_ranks(rows):
+    """순위가 1부터 빠짐없이 이어지지 않으면 예외 발생 (잘못된 데이터가 '저장 성공'으로 남는 것을 방지)"""
+    ranks = [int(r["순위"]) if r["순위"].isdigit() else None for r in rows]
+    if ranks != list(range(1, len(rows) + 1)):
+        missing = sorted(set(range(1, len(rows) + 1)) - set(ranks))
+        dup_count = len(ranks) - len(set(ranks))
+        raise Exception(f"순위 불연속 (총 {len(rows)}건, 중복 {dup_count}건, 누락 순위: {missing[:5]}{' ...' if len(missing) > 5 else ''})")
+
 def set_date_dropdown(page, index, value):
     """
     네이버 데이터랩 기간 설정 드롭다운을 제어합니다.
@@ -208,12 +230,14 @@ def _scrape_all(output_dir, failures):
                             next_btn = page.locator("a.btn_page_next")
                             if next_btn.is_visible():
                                 next_btn.click(force=True)
-                                time.sleep(1.5)
+                                wait_for_page(page, p_num + 1)
+                                time.sleep(1.5)  # 요청 간격 유지 (봇 탐지 방지)
                             else:
                                 break
-                                
+
                     # 6. 저장
                     if all_data:
+                        validate_ranks(all_data)
                         df = pd.DataFrame(all_data)
                         df.to_csv(output_file, index=False, encoding='utf-8-sig')
                         logger.info(f"저장 성공: {output_file} (총 {len(df)}건)")
